@@ -1,0 +1,26 @@
+# Claude Code
+.claude/
+
+# Model weights
+checkpoints/
+
+# Output
+output/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+env/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
