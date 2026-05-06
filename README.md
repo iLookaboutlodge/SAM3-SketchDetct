@@ -2,22 +2,25 @@
 
 Given an architectural sketch and an aerial/satellite photo of the same building, this tool uses SAM3 to segment the building footprint from the aerial image, then warps the sketch onto it via affine transform.
 
-**`building_matcher5_2.py` is the final version.** Earlier scripts (`v1`–`v5`) are kept for reference only.
+**`building_matcher6.py` is the current version.** Earlier scripts are kept for reference only.
 
 | Script | Purpose |
 |--------|---------|
 | `building_matcher4_2.py` | Single-pair, interactive — tune and inspect results |
-| `building_matcher5_2.py` | **Final.** Batch, fully automated |
+| `building_matcher5_2.py` | Batch, fully automated (v5 baseline) |
+| `building_matcher6.py` | **Current.** Batch + confidence scoring + discrepancy detection |
 | `sam3_explore.py` | Debug tool — visualize what SAM3 detects for a given set of text prompts on a single image, before running the full pipeline |
 
 ---
 
 ## How it works
 
-1. **Sketch feature extraction** — load sketch → grayscale → binarize (threshold 200) → morphological close → find largest contour → compute `minAreaRect`
-2. **SAM3 detection** — text-prompt segmentation with positive prompts; per-mask keep largest connected component; area filter; per-prompt dedup (keep largest area mask); negative prompt filter; IoU dedup
-3. **Auto-merge** — check bbox gap between all candidate pairs; if any gap is smaller than 10% of the image diagonal, merge all triggered candidates automatically
-4. **Affine alignment** — fit a similarity transform (scale + rotation + translation) between sketch `minAreaRect` corners and aerial mask corners; try all 4 corner orderings; keep the best IoU; composite sketch as transparent overlay onto aerial
+1. **Module A — Sketch feature extraction** — load sketch → grayscale → binarize (threshold 200) → morphological close → find largest contour → compute `minAreaRect`
+2. **Module B — SAM3 detection** — text-prompt segmentation with positive prompts; per-mask keep largest connected component; area filter; per-prompt dedup (keep largest area mask); negative prompt filter; IoU dedup
+3. **Auto-merge / target selection** — proximity clustering via union-find on pairwise bbox gap; if all masks form one cluster the merged mask is used directly; if multiple clusters the best-fitting one is selected and the rest flagged as unmatched buildings
+4. **Module D — Affine alignment** — fit a similarity transform (scale + rotation + translation) between sketch `minAreaRect` corners and aerial mask corners; try all 4 corner orderings; keep the best IoU; composite sketch as transparent overlay onto aerial
+5. **Module E — Confidence scoring** *(v6 new)* — compute a composite alignment score from IoU, HD95, Chamfer distance, PoLiS, and extra-area coverage; each metric is converted to a [0, 1] similarity via exponential decay and combined with configurable weights
+6. **Module F — Discrepancy detection** *(v6 new)* — identify extra protrusions in the aerial footprint not covered by the sketch, sketch regions missing from the aerial, and fully unmatched buildings; filter out slivers by minimum area and compactness (isoperimetric quotient)
 
 ---
 
@@ -36,7 +39,10 @@ conda activate sam3
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 
 # Core dependencies
-pip install ultralytics opencv-python numpy matplotlib
+pip install ultralytics opencv-python numpy matplotlib scipy
+
+# Optional — enables PoLiS metric in Module E
+pip install shapely
 ```
 
 ### Model weights
@@ -51,6 +57,48 @@ SAMLearning/
 └── checkpoints/
     └── sam3.pt        (~3.5 GB)
 ```
+
+---
+
+## `building_matcher6.py` — Batch mode with confidence scoring and discrepancy detection (current)
+
+Extends v5.2 with two new pipeline stages. Processes multiple sketch/aerial pairs in one run with no interactive input.
+
+### Configuration
+
+Edit `SKETCH_AERIAL_PAIRS`:
+
+```python
+SKETCH_AERIAL_PAIRS = [
+    ("sketch_2.jpg",  "aerial_2.jpg"),
+    ("sketch_3.png",  "aerial_3.png"),
+    ("sketch.png",    "aerial.png"),
+]
+```
+
+### Running
+
+```bash
+python building_matcher6.py
+```
+
+### Outputs (`output/pair_v6/`)
+
+| File | Description |
+|------|-------------|
+| `alignment_result_N.png` | Sketch warped onto aerial (pair N) |
+| `discrepancy_map_N.png` | Aerial with color-coded diff overlay + legend |
+| `final_comparison_N.png` | **6-panel figure**: ① sketch ② SAM3 mask ③ isolated mask ④ alignment zoom ⑤ discrepancy map ⑥ confidence bar chart |
+| `detection_preview_N.png` | Candidate masks — saved when multiple candidates exist |
+
+### Discrepancy map color coding
+
+| Color | Meaning |
+|-------|---------|
+| Green | Matching area (sketch ∩ aerial) |
+| Cyan | Extra protrusion in aerial not covered by sketch |
+| Red | Sketch area missing from aerial |
+| Orange | Unmatched building(s) detected in aerial |
 
 ---
 
@@ -98,23 +146,9 @@ python building_matcher4_2.py
 
 ---
 
-## `building_matcher5_2.py` — Batch automated mode (final)
+## `building_matcher5_2.py` — Batch automated mode (v5 baseline)
 
-Processes multiple sketch/aerial pairs in one run. No interactive input at any point. Model is loaded once and reused across all pairs. Each pair is wrapped in error handling so a failure on one pair does not stop the others.
-
-### Configuration
-
-Edit `SKETCH_AERIAL_PAIRS`:
-
-```python
-SKETCH_AERIAL_PAIRS = [
-    ("sketch_2.jpg",  "aerial_2.jpg"),
-    ("sketch_3.png",  "aerial_3.png"),
-    ("sketch.png",    "aerial.png"),
-]
-```
-
-All paths are relative to the script's directory.
+Same pipeline as v4.2 but headless. Use v6 for new work; v5.2 is kept as a simpler reference without Module E/F.
 
 ### Running
 
@@ -122,37 +156,19 @@ All paths are relative to the script's directory.
 python building_matcher5_2.py
 ```
 
-### What happens
-
-The detection and merge logic is identical to v4.2. The only difference is candidate handling when auto-merge does not trigger:
-
-- **1 candidate** → selected automatically
-- **Multiple candidates, no auto-merge** → all are merged automatically; `detection_preview_N.png` is saved for inspection
-
-End-of-run summary:
-
-```
-============================================================
-  DONE  3 OK  /  0 failed
-  Output → .../output/pair_v5_2
-============================================================
-```
-
 ### Outputs (`output/pair_v5_2/`)
-
-Files are numbered by pair index:
 
 | File | Description |
 |------|-------------|
-| `alignment_result_1.png` | Sketch warped onto aerial (pair 1) |
-| `final_comparison_1.png` | 4-panel figure (pair 1) |
-| `detection_preview_1.png` | Candidate masks — only saved when auto-merge does not trigger |
+| `alignment_result_N.png` | Sketch warped onto aerial (pair N) |
+| `final_comparison_N.png` | 4-panel figure (pair N) |
+| `detection_preview_N.png` | Candidate masks — only saved when auto-merge does not trigger |
 
 ---
 
 ## `sam3_explore.py` — SAM3 detection debugger
 
-Use this before running the alignment pipeline to check whether SAM3 can correctly detect the building in a given aerial image. Adjust prompts here first, then copy working settings into `building_matcher4_2.py` or `building_matcher5_2.py`.
+Use this before running the alignment pipeline to check whether SAM3 can correctly detect the building in a given aerial image. Adjust prompts here first, then copy working settings into the matcher scripts.
 
 ### Configuration
 
@@ -185,7 +201,9 @@ Saves a side-by-side visualization to `output/sam3_explore.png` showing the orig
 
 ## Tuning parameters
 
-Both scripts share the same parameter names. All are in the `★` section near the top of each file.
+All parameters are in the `★` section near the top of each script.
+
+### Detection & alignment (all versions)
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -196,6 +214,33 @@ Both scripts share the same parameter names. All are in the `★` section near t
 | `IOU_DEDUP` | `0.5` | IoU threshold for deduplicating overlapping positive masks |
 | `MIN_MASK_FRACTION` | `0.01` | Minimum mask area as a fraction of total image pixels |
 | `MAX_MASK_FRACTION` | `0.70` | Maximum mask area as a fraction of total image pixels |
-| `AUTO_MERGE_PROXIMITY` | `0.1` | Bbox gap threshold as a fraction of image diagonal; `0` = disabled |
 | `ZOOM_PAD_RATIO` | `0.20` | Padding around the target region in the alignment zoom panel |
 | `CLAHE_ENABLED` | `False` | Contrast enhancement before SAM3 inference; keep `False` to match `sam3_explore.py` |
+
+### Multi-building handling (v6)
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `MULTI_BLDG_PROXIMITY` | `0.10` | Bbox gap threshold (fraction of image diagonal) for clustering masks into one building |
+| `MULTI_BLDG_IOU_THRESH` | `0.35` | Merged IoU below this triggers per-cluster fallback |
+| `MULTI_BLDG_MISSING_THRESH` | `0.10` | Missing area > this fraction of merged building area → re-evaluate clusters individually |
+
+### Module E — Confidence scoring weights (v6)
+
+Weights must sum to 1.0. Distance metrics use exponential decay: `sim = exp(−distance / (CONF_DECAY_FRAC × diagonal))`.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `CONF_WEIGHT_IOU` | `0.30` | Alignment IoU |
+| `CONF_WEIGHT_HD95` | `0.20` | 95th-percentile Hausdorff boundary similarity |
+| `CONF_WEIGHT_CHAMFER` | `0.15` | Average Chamfer boundary similarity |
+| `CONF_WEIGHT_POLIS` | `0.10` | PoLiS polygon-line similarity (requires `shapely`) |
+| `CONF_WEIGHT_EXTRA` | `0.25` | Extra-area penalty: uncovered aerial area reduces score |
+| `CONF_DECAY_FRAC` | `0.05` | Distance at which similarity ≈ 0.37, as a fraction of image diagonal |
+
+### Module F — Discrepancy filtering (v6)
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `DISCREP_MIN_AREA_FRAC` | `0.02` | Ignore discrepancy regions smaller than 2% of the largest building area |
+| `DISCREP_MIN_COMPACTNESS` | `0.05` | Isoperimetric quotient threshold (4πA/P²); regions below this are treated as slivers and discarded |
